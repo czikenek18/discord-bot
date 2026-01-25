@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+
+# Discord
+user_stats.json
+*.tmp
+
+# System
+.DS_Store
+Thumbs.db
