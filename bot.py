@@ -6,7 +6,33 @@ import logging
 import sys
 import atexit
 import signal
+import asyncio
+import threading
 from datetime import datetime
+from aiohttp import web
+
+# ========== HEALTH CHECK SERVER (for Railway) ==========
+def run_health_server():
+    """Simple HTTP server to keep Railway happy"""
+    async def handle_health(request):
+        return web.Response(text="OK")
+    
+    async def start_server():
+        app = web.Application()
+        app.router.add_get('/', handle_health)
+        app.router.add_get('/health', handle_health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        await site.start()
+        print("✅ Health server running on port 8080")
+        await asyncio.Event().wait()
+    
+    asyncio.run(start_server())
+
+# Start health server in background
+health_thread = threading.Thread(target=run_health_server, daemon=True)
+health_thread.start()
 
 # ========== CONFIGURATION ==========
 logging.basicConfig(
@@ -36,124 +62,118 @@ for cls in AVAILABLE_CLASSES:
     CLASS_MAPPING[cls_lower.replace(" ", "")] = cls
     CLASS_MAPPING[cls_lower.replace(" ", "-")] = cls
 
-# ========== SMART STORAGE SYSTEM ==========
-class SmartStorage:
-    """Smart storage that survives Railway restarts"""
-    
-    def __init__(self):
-        self.locations = [
-            '/data/user_stats.json',           # Railway Volume (PERSISTENT)
-            '/tmp/user_stats.json',            # Railway temp
-            './user_stats.json',               # Local
-            'user_stats.json'                  # Current dir
-        ]
-        
-        self.backup_locations = [
-            '/data/user_stats_backup.json',    # Railway Volume backup
-            './user_stats_backup.json'         # Local backup
-        ]
-        
-        self.stats_file = self.find_best_location()
-        logger.info(f"📁 Using storage: {self.stats_file}")
-        
-    def find_best_location(self):
-        """Find the best location for storage"""
-        # Check Railway Volume first
-        if os.path.exists('/data'):
-            os.makedirs('/data', exist_ok=True)
-            return '/data/user_stats.json'
-        
-        # Check other locations
-        for location in self.locations:
-            if os.path.exists(location):
-                return location
-        
-        # Create in current directory
-        return './user_stats.json'
-    
-    def load(self):
-        """Load stats with multiple fallbacks"""
-        # Try main file
-        try:
-            if os.path.exists(self.stats_file):
-                with open(self.stats_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    logger.info(f"✅ Loaded {len(data)} players from {self.stats_file}")
-                    return data
-        except Exception as e:
-            logger.warning(f"Failed to load {self.stats_file}: {e}")
-        
-        # Try backups
-        for backup in self.backup_locations:
-            try:
-                if os.path.exists(backup):
-                    with open(backup, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        logger.info(f"🔄 Restored from backup: {backup}")
-                        # Save to main location
-                        self.save(data)
-                        return data
-            except:
-                continue
-        
-        logger.info("📂 Starting fresh database")
-        return {}
-    
-    def save(self, data):
-        """Save with atomic write and backup"""
-        try:
-            # Create directory if needed
-            os.makedirs(os.path.dirname(self.stats_file), exist_ok=True)
-            
-            # Create backup
-            if os.path.exists(self.stats_file):
-                import shutil
-                backup_file = self.stats_file + '.backup'
-                shutil.copy2(self.stats_file, backup_file)
-            
-            # Atomic write
-            temp_file = self.stats_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            # Replace
-            os.replace(temp_file, self.stats_file)
-            
-            # Also save to backup location
-            if self.stats_file != '/data/user_stats.json' and os.path.exists('/data'):
-                backup_path = '/data/user_stats_backup.json'
-                with open(backup_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"💾 Saved {len(data)} players")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Save failed: {e}")
-            return False
-    
-    def emergency_backup(self, data):
-        """Emergency backup to multiple locations"""
-        locations = [
-            '/data/user_stats_emergency.json',
-            './user_stats_emergency.json',
-            '/tmp/user_stats_emergency.json'
-        ]
-        
-        for loc in locations:
-            try:
-                os.makedirs(os.path.dirname(loc), exist_ok=True)
-                with open(loc, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                logger.info(f"🚨 Emergency backup to {loc}")
-            except:
-                continue
+# ========== PERSISTENT STORAGE ==========
+def get_storage_path():
+    """Get persistent storage path (Railway Volume first)"""
+    if os.path.exists('/data'):
+        return '/data/user_stats.json'
+    return './user_stats.json'
 
-# Initialize storage
-storage = SmartStorage()
+STATS_FILE = get_storage_path()
+logger.info(f"💾 Persistent storage: {STATS_FILE}")
 
-# ========== UTILITY FUNCTIONS ==========
-def normalize_class_name(input_class: str) -> str | None:
+def load_stats():
+    """Load stats from persistent storage"""
+    try:
+        if os.path.exists(STATS_FILE):
+            with open(STATS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logger.info(f"📂 Loaded {len(data)} players")
+                return data
+    except Exception as e:
+        logger.warning(f"Load error: {e}")
+    return {}
+
+def save_stats(stats):
+    """Save stats with backup"""
+    try:
+        # Create directory if needed
+        os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+        
+        # Backup old file
+        if os.path.exists(STATS_FILE):
+            import shutil
+            shutil.copy2(STATS_FILE, STATS_FILE + '.backup')
+        
+        # Atomic write
+        temp_file = STATS_FILE + '.tmp'
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
+        os.replace(temp_file, STATS_FILE)
+        
+        logger.info(f"💾 Saved {len(stats)} players")
+        return True
+    except Exception as e:
+        logger.error(f"Save error: {e}")
+        return False
+
+def calculate_total(stats):
+    return stats.get('attack', 0) + stats.get('defense', 0) + stats.get('accuracy', 0)
+
+# ========== SHUTDOWN HANDLING ==========
+def shutdown_handler():
+    logger.info("🔄 Graceful shutdown")
+
+def signal_handler(sig, frame):
+    logger.info(f"Signal {sig}, shutting down...")
+    shutdown_handler()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+atexit.register(shutdown_handler)
+
+# ========== BOT EVENTS ==========
+@bot.event
+async def on_ready():
+    stats = load_stats()
+    total_power = sum(calculate_total(s) for s in stats.values())
+    
+    logger.info(f"🤖 {bot.user} is ready!")
+    logger.info(f"📊 {len(bot.guilds)} guilds | {len(stats)} players | 💪 {total_power:,} power")
+    
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=f"{len(stats)} players | !commands"
+        )
+    )
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    await bot.process_commands(message)
+
+# ========== HELPER FUNCTIONS ==========
+async def send_help(user):
+    embed = discord.Embed(
+        title="🤖 GuildStats Bot - Commands",
+        description="**DM only for privacy**",
+        color=discord.Color.blue()
+    )
+    
+    commands_list = [
+        ("`!setstats <atk> <def> <acc> [class]`", "Set your stats"),
+        ("`!update <atk> <def> <acc>`", "Update stats"),
+        ("`!setclass <class>`", "Set character class"),
+        ("`!setskin <yes/no>`", "Legendary skin"),
+        ("`!setfamiliar <yes/no>`", "Legendary familiar"),
+        ("`!mystats`", "View your stats"),
+        ("`!clearmystats`", "Delete your stats"),
+        ("`!commands`", "Show this help"),
+        ("`!test`", "Check if bot is online"),
+        ("`!status`", "Bot status and stats"),
+        ("`!storage`", "Storage information"),
+        ("`!backup`", "Create manual backup")
+    ]
+    
+    for cmd, desc in commands_list:
+        embed.add_field(name=cmd, value=desc, inline=False)
+    
+    await user.send(embed=embed)
+
+def normalize_class_name(input_class):
     if not input_class:
         return None
     
@@ -173,73 +193,43 @@ def normalize_class_name(input_class: str) -> str | None:
     
     return None
 
-def clean_text(text: str) -> str:
-    if not text:
-        return ""
-    return ''.join(c for c in str(text) if ord(c) < 128)
+# ========== COMMANDS ==========
+@bot.command(name='commands')
+async def help_command(ctx):
+    await send_help(ctx.author)
 
-def load_stats() -> dict:
-    return storage.load()
-
-def save_stats(stats: dict) -> bool:
-    return storage.save(stats)
-
-def calculate_total(stats: dict) -> int:
-    return stats.get('attack', 0) + stats.get('defense', 0) + stats.get('accuracy', 0)
-
-# ========== SHUTDOWN HANDLING ==========
-def shutdown_handler():
-    logger.info("🔄 Shutting down gracefully...")
-    # Final backup
-    stats = load_stats()
-    if stats:
-        storage.emergency_backup(stats)
-        logger.info(f"✅ Final backup of {len(stats)} players")
-
-def signal_handler(sig, frame):
-    logger.info(f"Received signal {sig}, shutting down...")
-    shutdown_handler()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-atexit.register(shutdown_handler)
-
-# ========== BOT EVENTS ==========
-@bot.event
-async def on_ready():
-    logger.info(f"🤖 {bot.user} is ready!")
-    logger.info(f"📊 Serving {len(bot.guilds)} guild(s)")
-    
-    stats = load_stats()
-    total_power = sum(calculate_total(s) for s in stats.values())
-    logger.info(f"📈 Database: {len(stats)} players, {total_power:,} total power")
-    
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(stats)} players | !commands"
-        )
-    )
-
-@bot.event
-async def on_message(message):
-    if message.content.startswith('!'):
-        logger.debug(f"Command from {message.author}: {message.content[:50]}")
-    
-    if message.author == bot.user:
-        return
-    
-    await bot.process_commands(message)
-
-# ========== COMMANDS (SKRÓCONA WERSJA - DODAJ RESZTĘ) ==========
 @bot.command(name='test')
 async def test_command(ctx):
     await ctx.send('✅ Bot is online and working!')
 
+@bot.command(name='status')
+async def status_command(ctx):
+    stats = load_stats()
+    
+    embed = discord.Embed(
+        title="🤖 Bot Status",
+        color=discord.Color.green()
+    )
+    
+    embed.add_field(name="🏓 Ping", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    embed.add_field(name="📊 Players", value=str(len(stats)), inline=True)
+    embed.add_field(name="💾 Storage", value="Railway Volume" if '/data' in STATS_FILE else "Local", inline=True)
+    
+    total_power = sum(calculate_total(s) for s in stats.values())
+    if stats:
+        avg_power = total_power / len(stats)
+        embed.add_field(name="⚡ Total Power", value=f"{total_power:,}", inline=True)
+        embed.add_field(name="📈 Average", value=f"{avg_power:,.1f}", inline=True)
+    
+    embed.set_footer(text="Hosted on Railway • Data is persistent")
+    await ctx.send(embed=embed)
+
 @bot.command(name='setstats')
 async def set_stats(ctx, attack: int, defense: int, accuracy: int, *, character_class: str = None):
     normalized_class = normalize_class_name(character_class)
+    if character_class and not normalized_class:
+        await ctx.send(f'❌ Invalid class. Available: {", ".join(AVAILABLE_CLASSES)}')
+        return
     
     stats = load_stats()
     user_id = str(ctx.author.id)
@@ -248,9 +238,9 @@ async def set_stats(ctx, attack: int, defense: int, accuracy: int, *, character_
         'attack': attack,
         'defense': defense,
         'accuracy': accuracy,
-        'username': clean_text(ctx.author.name),
-        'display_name': clean_text(ctx.author.display_name),
         'character_class': normalized_class,
+        'legendary_skin': False,
+        'legendary_familiar': False,
         'total_score': attack + defense + accuracy,
         'updated_at': datetime.now().isoformat()
     }
@@ -258,46 +248,333 @@ async def set_stats(ctx, attack: int, defense: int, accuracy: int, *, character_
     stats[user_id] = user_data
     
     if save_stats(stats):
-        await ctx.send(f'✅ Stats saved! Total: {attack + defense + accuracy}')
+        embed = discord.Embed(title="✅ Statistics Saved!", color=discord.Color.green())
+        embed.add_field(name="⚔️ Attack", value=str(attack), inline=True)
+        embed.add_field(name="🛡️ Defense", value=str(defense), inline=True)
+        embed.add_field(name="🎯 Accuracy", value=str(accuracy), inline=True)
+        
+        if normalized_class:
+            embed.add_field(name="🏆 Class", value=normalized_class, inline=True)
+        
+        total = attack + defense + accuracy
+        embed.add_field(name="💪 Total", value=str(total), inline=True)
+        embed.set_footer(text="Use !mystats to view")
+        
+        await ctx.send(embed=embed)
     else:
-        await ctx.send('❌ Error saving. Emergency backup created.')
-        storage.emergency_backup(stats)
+        await ctx.send('❌ Error saving. Try again.')
 
-# ... DODAJ TU WSZYSTKIE INNE KOMENDY KTÓRE JUŻ MASZ ...
-# mystats, update, setclass, setskin, setfamiliar, list, guildpower, etc.
-
-@bot.command(name='backup')
-async def backup_command(ctx):
-    """Create manual backup (Admin only)"""
+@bot.command(name='mystats')
+async def my_stats(ctx):
+    user_id = str(ctx.author.id)
     stats = load_stats()
-    storage.emergency_backup(stats)
-    await ctx.send(f'✅ Manual backup created: {len(stats)} players')
+    
+    if user_id not in stats:
+        await ctx.send('❌ No statistics. Use `!setstats` first.')
+        return
+    
+    data = stats[user_id]
+    total = calculate_total(data)
+    
+    embed = discord.Embed(title="📊 Your Statistics", color=discord.Color.blue())
+    embed.add_field(name="⚔️ Attack", value=str(data['attack']), inline=True)
+    embed.add_field(name="🛡️ Defense", value=str(data['defense']), inline=True)
+    embed.add_field(name="🎯 Accuracy", value=str(data['accuracy']), inline=True)
+    embed.add_field(name="💪 Total", value=str(total), inline=True)
+    
+    if data.get('character_class'):
+        embed.add_field(name="🏆 Class", value=data['character_class'], inline=True)
+    
+    skin = "✅" if data.get('legendary_skin') else "❌"
+    familiar = "✅" if data.get('legendary_familiar') else "❌"
+    embed.add_field(name="✨ Skin", value=skin, inline=True)
+    embed.add_field(name="🐉 Familiar", value=familiar, inline=True)
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='setskin')
+async def set_skin(ctx, has_skin: str = None):
+    if not has_skin:
+        await ctx.send('❌ Usage: `!setskin yes` or `!setskin no`')
+        return
+    
+    has_skin_lower = has_skin.lower()
+    if has_skin_lower not in ['yes', 'no', 'tak', 'nie']:
+        await ctx.send('❌ Use: `!setskin yes` or `!setskin no`')
+        return
+    
+    skin_bool = has_skin_lower in ['yes', 'tak']
+    user_id = str(ctx.author.id)
+    stats = load_stats()
+    
+    if user_id not in stats:
+        await ctx.send('❌ First use `!setstats`')
+        return
+    
+    stats[user_id]['legendary_skin'] = skin_bool
+    
+    if save_stats(stats):
+        message = "✅ You have" if skin_bool else "❌ You don't have"
+        await ctx.send(f'{message} **Legendary Skin**')
+    else:
+        await ctx.send('❌ Error saving.')
+
+@bot.command(name='setfamiliar')
+async def set_familiar(ctx, has_familiar: str = None):
+    if not has_familiar:
+        await ctx.send('❌ Usage: `!setfamiliar yes` or `!setfamiliar no`')
+        return
+    
+    has_familiar_lower = has_familiar.lower()
+    if has_familiar_lower not in ['yes', 'no', 'tak', 'nie']:
+        await ctx.send('❌ Use: `!setfamiliar yes` or `!setfamiliar no`')
+        return
+    
+    familiar_bool = has_familiar_lower in ['yes', 'tak']
+    user_id = str(ctx.author.id)
+    stats = load_stats()
+    
+    if user_id not in stats:
+        await ctx.send('❌ First use `!setstats`')
+        return
+    
+    stats[user_id]['legendary_familiar'] = familiar_bool
+    
+    if save_stats(stats):
+        message = "✅ You have" if familiar_bool else "❌ You don't have"
+        await ctx.send(f'{message} **Legendary Familiar**')
+    else:
+        await ctx.send('❌ Error saving.')
+
+@bot.command(name='setclass')
+async def set_class(ctx, *, character_class: str = None):
+    if not character_class:
+        await ctx.send(f'❌ Usage: `!setclass <class>`\n✅ Available: {", ".join(AVAILABLE_CLASSES)}')
+        return
+    
+    normalized_class = normalize_class_name(character_class)
+    if not normalized_class:
+        await ctx.send(f'❌ Invalid class. Available: {", ".join(AVAILABLE_CLASSES)}')
+        return
+    
+    user_id = str(ctx.author.id)
+    stats = load_stats()
+    
+    if user_id not in stats:
+        await ctx.send('❌ First use `!setstats`')
+        return
+    
+    stats[user_id]['character_class'] = normalized_class
+    
+    if save_stats(stats):
+        await ctx.send(f'✅ Class set to: **{normalized_class}**')
+    else:
+        await ctx.send('❌ Error saving.')
+
+@bot.command(name='update')
+async def update_stats(ctx, attack: int = None, defense: int = None, accuracy: int = None):
+    user_id = str(ctx.author.id)
+    stats = load_stats()
+    
+    if user_id not in stats:
+        await ctx.send('❌ No statistics. Use `!setstats` first.')
+        return
+    
+    updated = False
+    if attack is not None:
+        stats[user_id]['attack'] = attack
+        updated = True
+    if defense is not None:
+        stats[user_id]['defense'] = defense
+        updated = True
+    if accuracy is not None:
+        stats[user_id]['accuracy'] = accuracy
+        updated = True
+    
+    if not updated:
+        await ctx.send('❌ No changes provided.')
+        return
+    
+    stats[user_id]['total_score'] = calculate_total(stats[user_id])
+    stats[user_id]['updated_at'] = datetime.now().isoformat()
+    
+    if save_stats(stats):
+        embed = discord.Embed(title="✅ Updated", color=discord.Color.green())
+        if attack is not None:
+            embed.add_field(name="⚔️ Attack", value=str(attack), inline=True)
+        if defense is not None:
+            embed.add_field(name="🛡️ Defense", value=str(defense), inline=True)
+        if accuracy is not None:
+            embed.add_field(name="🎯 Accuracy", value=str(accuracy), inline=True)
+        
+        total = calculate_total(stats[user_id])
+        embed.add_field(name="💪 New Total", value=str(total), inline=False)
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send('❌ Error saving.')
+
+@bot.command(name='guildpower')
+async def guild_power(ctx):
+    if isinstance(ctx.channel, discord.DMChannel):
+        await ctx.send('❌ Use on server channel.')
+        return
+    
+    stats = load_stats()
+    
+    if not stats:
+        await ctx.send('📊 No statistics yet.')
+        return
+    
+    total_power = 0
+    member_count = 0
+    
+    for user_id, user_stats in stats.items():
+        member = ctx.guild.get_member(int(user_id))
+        if member:
+            total_power += calculate_total(user_stats)
+            member_count += 1
+    
+    if member_count == 0:
+        await ctx.send('📊 No active members.')
+        return
+    
+    avg_power = total_power / member_count
+    
+    embed = discord.Embed(
+        title="💪 Guild Power",
+        description="**High Council Access**",
+        color=discord.Color.red()
+    )
+    
+    embed.add_field(name="👥 Members", value=str(member_count), inline=True)
+    embed.add_field(name="⚡ Total", value=f"{total_power:,}", inline=True)
+    embed.add_field(name="📊 Average", value=f"{avg_power:,.1f}", inline=True)
+    
+    skin_count = sum(1 for data in stats.values() if data.get('legendary_skin', False))
+    familiar_count = sum(1 for data in stats.values() if data.get('legendary_familiar', False))
+    
+    embed.add_field(name="✨ Skins", value=str(skin_count), inline=True)
+    embed.add_field(name="🐉 Familiars", value=str(familiar_count), inline=True)
+    embed.set_footer(text="High Council command")
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='list', aliases=['l'])
+async def list_stats(ctx):
+    if isinstance(ctx.channel, discord.DMChannel):
+        await ctx.send('❌ Use on server channel.')
+        return
+    
+    stats = load_stats()
+    
+    if not stats:
+        await ctx.send('📊 No statistics.')
+        return
+    
+    active_players = []
+    for user_id, user_data in stats.items():
+        member = ctx.guild.get_member(int(user_id))
+        if member:
+            active_players.append({
+                'member': member,
+                'stats': user_data,
+                'total': calculate_total(user_data)
+            })
+    
+    if not active_players:
+        await ctx.send('📊 No active players.')
+        return
+    
+    active_players.sort(key=lambda x: x['total'], reverse=True)
+    
+    embed = discord.Embed(
+        title="📋 Players - Detailed Stats",
+        description=f"**High Council** • {len(active_players)} players",
+        color=discord.Color.purple()
+    )
+    
+    for i, player in enumerate(active_players[:15], 1):
+        icons = ""
+        if player['stats'].get('legendary_skin', False):
+            icons += "✨"
+        if player['stats'].get('legendary_familiar', False):
+            icons += "🐉"
+        
+        medal = ""
+        if i == 1: medal = "👑 "
+        elif i == 2: medal = "🥈 "
+        elif i == 3: medal = "🥉 "
+        
+        class_text = player['stats'].get('character_class', '❓')
+        atk = player['stats'].get('attack', 0)
+        df = player['stats'].get('defense', 0)
+        acc = player['stats'].get('accuracy', 0)
+        
+        embed.add_field(
+            name=f"{medal}{i}. {player['member'].display_name} {icons}",
+            value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='clearmystats')
+async def clear_stats(ctx):
+    user_id = str(ctx.author.id)
+    stats = load_stats()
+    
+    if user_id in stats:
+        del stats[user_id]
+        if save_stats(stats):
+            await ctx.send('✅ Statistics deleted.')
+        else:
+            await ctx.send('❌ Error deleting.')
+    else:
+        await ctx.send('❌ No statistics to delete.')
 
 @bot.command(name='storage')
-async def storage_info(ctx):
-    """Show storage information"""
+async def storage_command(ctx):
     stats = load_stats()
     
     embed = discord.Embed(
-        title="💾 Storage Info",
+        title="💾 Storage Information",
         color=discord.Color.blue()
     )
     
-    embed.add_field(name="📁 Location", value=storage.stats_file, inline=False)
+    embed.add_field(name="📍 Path", value=STATS_FILE, inline=False)
     embed.add_field(name="👥 Players", value=str(len(stats)), inline=True)
     embed.add_field(name="💪 Total Power", value=f"{sum(calculate_total(s) for s in stats.values()):,}", inline=True)
     
-    if os.path.exists('/data'):
-        embed.add_field(name="🔒 Persistent", value="✅ Railway Volume", inline=True)
+    if '/data' in STATS_FILE:
+        embed.add_field(name="✅ Type", value="Railway Volume (Persistent)", inline=True)
     else:
-        embed.add_field(name="⚠️ Warning", value="Using temp storage", inline=True)
+        embed.add_field(name="⚠️ Type", value="Local file", inline=True)
+    
+    if os.path.exists(STATS_FILE):
+        size = os.path.getsize(STATS_FILE)
+        embed.add_field(name="📁 File Size", value=f"{size:,} bytes", inline=True)
     
     await ctx.send(embed=embed)
+
+@bot.command(name='backup')
+async def backup_command(ctx):
+    stats = load_stats()
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_file = f'backup_{timestamp}.json'
+    
+    with open(backup_file, 'w', encoding='utf-8') as f:
+        json.dump({
+            'backup_date': datetime.now().isoformat(),
+            'player_count': len(stats),
+            'data': stats
+        }, f, indent=2)
+    
+    await ctx.send(f'✅ Backup created: `{backup_file}` with {len(stats)} players')
 
 # ========== START BOT ==========
 if __name__ == "__main__":
     logger.info("=" * 50)
-    logger.info("🚀 Starting GuildStats Bot with PERSISTENT STORAGE")
+    logger.info("🚀 FINAL VERSION: GuildStats Bot with PERSISTENT STORAGE")
     logger.info("=" * 50)
     
     from dotenv import load_dotenv
