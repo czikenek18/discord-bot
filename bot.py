@@ -481,7 +481,7 @@ async def guild_power(ctx):
 
 @bot.command(name='list', aliases=['l'])
 async def list_stats(ctx):
-    """List all players (High Council only)"""
+    """List all players with detailed stats (High Council only)"""
     if isinstance(ctx.channel, discord.DMChannel):
         await ctx.send('❌ Use on server channel.')
         return
@@ -509,7 +509,7 @@ async def list_stats(ctx):
     active_players.sort(key=lambda x: x['total'], reverse=True)
     
     embed = discord.Embed(
-        title="📋 Players",
+        title="📋 Players - Detailed Stats",
         description=f"**High Council** • {len(active_players)} players",
         color=discord.Color.purple()
     )
@@ -527,10 +527,13 @@ async def list_stats(ctx):
         elif i == 3: medal = "🥉 "
         
         class_text = player['stats'].get('character_class', '❓')
+        atk = player['stats'].get('attack', 0)
+        df = player['stats'].get('defense', 0)
+        acc = player['stats'].get('accuracy', 0)
         
         embed.add_field(
             name=f"{medal}{i}. {player['member'].display_name} {icons}",
-            value=f"**{player['total']:,}** | {class_text}",
+            value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
             inline=False
         )
     
