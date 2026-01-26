@@ -8,6 +8,7 @@ import atexit
 import signal
 import asyncio
 import threading
+import shutil
 from datetime import datetime
 from aiohttp import web
 
@@ -92,7 +93,6 @@ def save_stats(stats):
         
         # Backup old file
         if os.path.exists(STATS_FILE):
-            import shutil
             shutil.copy2(STATS_FILE, STATS_FILE + '.backup')
         
         # Atomic write
@@ -165,7 +165,8 @@ async def send_help(user):
         ("`!test`", "Check if bot is online"),
         ("`!status`", "Bot status and stats"),
         ("`!storage`", "Storage information"),
-        ("`!backup`", "Create manual backup")
+        ("`!backup`", "Create manual backup"),
+        ("`!list <page>`", "Player ranking with pagination")
     ]
     
     for cmd, desc in commands_list:
@@ -460,9 +461,17 @@ async def guild_power(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='list', aliases=['l'])
-async def list_stats(ctx):
+async def list_stats(ctx, page: str = "1"):
+    """List all players with pagination (High Council only)"""
     if isinstance(ctx.channel, discord.DMChannel):
         await ctx.send('❌ Use on server channel.')
+        return
+    
+    # Convert page to int with error handling
+    try:
+        page_num = int(page)
+    except ValueError:
+        await ctx.send('❌ Invalid page number. Use: `!list <page>` or `!list`')
         return
     
     stats = load_stats()
@@ -487,13 +496,28 @@ async def list_stats(ctx):
     
     active_players.sort(key=lambda x: x['total'], reverse=True)
     
+    # Pagination settings
+    PLAYERS_PER_PAGE = 15
+    total_pages = max(1, (len(active_players) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
+    page_num = max(1, min(page_num, total_pages))
+    
+    start_idx = (page_num - 1) * PLAYERS_PER_PAGE
+    end_idx = min(start_idx + PLAYERS_PER_PAGE, len(active_players))
+    
+    # Calculate guild totals
+    total_guild_power = sum(player['total'] for player in active_players)
+    avg_power = total_guild_power / len(active_players) if active_players else 0
+    
     embed = discord.Embed(
-        title="📋 Players - Detailed Stats",
-        description=f"**High Council** • {len(active_players)} players",
+        title=f"📋 Player Ranking - Page {page_num}/{total_pages}",
+        description=f"**{len(active_players)} players** • Total: **{total_guild_power:,}** • Avg: **{avg_power:,.0f}**",
         color=discord.Color.purple()
     )
     
-    for i, player in enumerate(active_players[:15], 1):
+    for i in range(start_idx, end_idx):
+        player = active_players[i]
+        rank = i + 1
+        
         icons = ""
         if player['stats'].get('legendary_skin', False):
             icons += "✨"
@@ -501,9 +525,9 @@ async def list_stats(ctx):
             icons += "🐉"
         
         medal = ""
-        if i == 1: medal = "👑 "
-        elif i == 2: medal = "🥈 "
-        elif i == 3: medal = "🥉 "
+        if rank == 1: medal = "👑 "
+        elif rank == 2: medal = "🥈 "
+        elif rank == 3: medal = "🥉 "
         
         class_text = player['stats'].get('character_class', '❓')
         atk = player['stats'].get('attack', 0)
@@ -511,10 +535,24 @@ async def list_stats(ctx):
         acc = player['stats'].get('accuracy', 0)
         
         embed.add_field(
-            name=f"{medal}{i}. {player['member'].display_name} {icons}",
+            name=f"{medal}{rank}. {player['member'].display_name} {icons}",
             value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
             inline=False
         )
+    
+    # Add statistics footer
+    skin_count = sum(1 for p in active_players if p['stats'].get('legendary_skin', False))
+    familiar_count = sum(1 for p in active_players if p['stats'].get('legendary_familiar', False))
+    
+    footer_parts = []
+    footer_parts.append(f"✨ {skin_count} skins")
+    footer_parts.append(f"🐉 {familiar_count} familiars")
+    
+    if total_pages > 1:
+        footer_parts.append(f"Page {page_num}/{total_pages}")
+        footer_parts.append("Use !list <page>")
+    
+    embed.set_footer(text=" • ".join(footer_parts))
     
     await ctx.send(embed=embed)
 
@@ -574,7 +612,7 @@ async def backup_command(ctx):
 # ========== START BOT ==========
 if __name__ == "__main__":
     logger.info("=" * 50)
-    logger.info("🚀 FINAL VERSION: GuildStats Bot with PERSISTENT STORAGE")
+    logger.info("🚀 FINAL VERSION: GuildStats Bot with PERSISTENT STORAGE & PAGINATION")
     logger.info("=" * 50)
     
     from dotenv import load_dotenv
