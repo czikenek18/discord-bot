@@ -166,7 +166,7 @@ async def send_help(user):
         ("`!status`", "Bot status and stats"),
         ("`!storage`", "Storage information"),
         ("`!backup`", "Create manual backup"),
-        ("`!list <page>`", "Player ranking with pagination")
+        ("`!list`", "Show ALL players automatically")
     ]
     
     for cmd, desc in commands_list:
@@ -461,17 +461,10 @@ async def guild_power(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='list', aliases=['l'])
-async def list_stats(ctx, page: str = "1"):
-    """List all players with pagination (High Council only)"""
+async def list_stats(ctx):
+    """List ALL players automatically (shows all on one page if possible)"""
     if isinstance(ctx.channel, discord.DMChannel):
         await ctx.send('❌ Use on server channel.')
-        return
-    
-    # Convert page to int with error handling
-    try:
-        page_num = int(page)
-    except ValueError:
-        await ctx.send('❌ Invalid page number. Use: `!list <page>` or `!list`')
         return
     
     stats = load_stats()
@@ -496,65 +489,124 @@ async def list_stats(ctx, page: str = "1"):
     
     active_players.sort(key=lambda x: x['total'], reverse=True)
     
-    # Pagination settings
-    PLAYERS_PER_PAGE = 15
-    total_pages = max(1, (len(active_players) + PLAYERS_PER_PAGE - 1) // PLAYERS_PER_PAGE)
-    page_num = max(1, min(page_num, total_pages))
-    
-    start_idx = (page_num - 1) * PLAYERS_PER_PAGE
-    end_idx = min(start_idx + PLAYERS_PER_PAGE, len(active_players))
-    
-    # Calculate guild totals
+    total_players = len(active_players)
     total_guild_power = sum(player['total'] for player in active_players)
-    avg_power = total_guild_power / len(active_players) if active_players else 0
+    avg_power = total_guild_power / total_players if total_players else 0
     
-    embed = discord.Embed(
-        title=f"📋 Player Ranking - Page {page_num}/{total_pages}",
-        description=f"**{len(active_players)} players** • Total: **{total_guild_power:,}** • Avg: **{avg_power:,.0f}**",
+    # SPRAWDŹ CZY WSZYSCY SIĘ MIESZCZĄ W JEDNYM EMBED (max 20 dla bezpieczeństwa)
+    if total_players <= 20:
+        # Wszyscy się mieszczą - wyślij jeden embed
+        embed = discord.Embed(
+            title=f"📋 Player Ranking - {total_players} players",
+            description=f"Total: **{total_guild_power:,}** • Avg: **{avg_power:,.0f}**",
+            color=discord.Color.purple()
+        )
+        
+        for i, player in enumerate(active_players, 1):
+            icons = ""
+            if player['stats'].get('legendary_skin', False):
+                icons += "✨"
+            if player['stats'].get('legendary_familiar', False):
+                icons += "🐉"
+            
+            medal = ""
+            if i == 1: medal = "👑 "
+            elif i == 2: medal = "🥈 "
+            elif i == 3: medal = "🥉 "
+            
+            class_text = player['stats'].get('character_class', '❓')
+            atk = player['stats'].get('attack', 0)
+            df = player['stats'].get('defense', 0)
+            acc = player['stats'].get('accuracy', 0)
+            
+            embed.add_field(
+                name=f"{medal}{i}. {player['member'].display_name} {icons}",
+                value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
+                inline=False
+            )
+        
+        # Dodaj statystyki footer
+        skin_count = sum(1 for p in active_players if p['stats'].get('legendary_skin', False))
+        familiar_count = sum(1 for p in active_players if p['stats'].get('legendary_familiar', False))
+        
+        embed.set_footer(text=f"✨ {skin_count} skins • 🐉 {familiar_count} familiars • All players shown")
+        await ctx.send(embed=embed)
+    
+    else:
+        # Za dużo graczy - automatycznie wyślij multiple embeds
+        await send_multi_page_list(ctx, active_players, total_guild_power, avg_power)
+
+async def send_multi_page_list(ctx, players, total_power, avg_power):
+    """Send multiple embeds automatically when there are more than 20 players"""
+    total_players = len(players)
+    
+    # Najpierw wyślij summary
+    summary_embed = discord.Embed(
+        title=f"📋 Player Ranking - {total_players} players",
+        description=f"**Auto-generating pages...**\nTotal: **{total_power:,}** • Avg: **{avg_power:,.0f}**",
         color=discord.Color.purple()
     )
     
-    for i in range(start_idx, end_idx):
-        player = active_players[i]
-        rank = i + 1
+    skin_count = sum(1 for p in players if p['stats'].get('legendary_skin', False))
+    familiar_count = sum(1 for p in players if p['stats'].get('legendary_familiar', False))
+    
+    summary_embed.add_field(name="📊 Summary", value=f"✨ {skin_count} skins • 🐉 {familiar_count} familiars", inline=False)
+    
+    total_pages = (total_players + 19) // 20  # 20 graczy na stronę
+    summary_embed.add_field(name="📄 Pages", value=f"Showing {total_pages} pages automatically", inline=False)
+    
+    await ctx.send(embed=summary_embed)
+    
+    # Teraz wyślij wszystkie strony
+    players_per_page = 20
+    
+    for page_num in range(total_pages):
+        start_idx = page_num * players_per_page
+        end_idx = min(start_idx + players_per_page, total_players)
         
-        icons = ""
-        if player['stats'].get('legendary_skin', False):
-            icons += "✨"
-        if player['stats'].get('legendary_familiar', False):
-            icons += "🐉"
-        
-        medal = ""
-        if rank == 1: medal = "👑 "
-        elif rank == 2: medal = "🥈 "
-        elif rank == 3: medal = "🥉 "
-        
-        class_text = player['stats'].get('character_class', '❓')
-        atk = player['stats'].get('attack', 0)
-        df = player['stats'].get('defense', 0)
-        acc = player['stats'].get('accuracy', 0)
-        
-        embed.add_field(
-            name=f"{medal}{rank}. {player['member'].display_name} {icons}",
-            value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
-            inline=False
+        embed = discord.Embed(
+            title=f"📋 Page {page_num + 1}/{total_pages}",
+            description=f"Players {start_idx + 1}-{end_idx} of {total_players}",
+            color=discord.Color.purple()
         )
-    
-    # Add statistics footer
-    skin_count = sum(1 for p in active_players if p['stats'].get('legendary_skin', False))
-    familiar_count = sum(1 for p in active_players if p['stats'].get('legendary_familiar', False))
-    
-    footer_parts = []
-    footer_parts.append(f"✨ {skin_count} skins")
-    footer_parts.append(f"🐉 {familiar_count} familiars")
-    
-    if total_pages > 1:
-        footer_parts.append(f"Page {page_num}/{total_pages}")
-        footer_parts.append("Use !list <page>")
-    
-    embed.set_footer(text=" • ".join(footer_parts))
-    
-    await ctx.send(embed=embed)
+        
+        for i in range(start_idx, end_idx):
+            player = players[i]
+            rank = i + 1
+            
+            icons = ""
+            if player['stats'].get('legendary_skin', False):
+                icons += "✨"
+            if player['stats'].get('legendary_familiar', False):
+                icons += "🐉"
+            
+            medal = ""
+            if rank == 1: medal = "👑 "
+            elif rank == 2: medal = "🥈 "
+            elif rank == 3: medal = "🥉 "
+            
+            class_text = player['stats'].get('character_class', '❓')
+            atk = player['stats'].get('attack', 0)
+            df = player['stats'].get('defense', 0)
+            acc = player['stats'].get('accuracy', 0)
+            
+            embed.add_field(
+                name=f"{medal}{rank}. {player['member'].display_name} {icons}",
+                value=f"**{player['total']:,}** ({atk}/{df}/{acc}) | {class_text}",
+                inline=False
+            )
+        
+        # Dla ostatniej strony dodaj "Complete" footer
+        if page_num == total_pages - 1:
+            embed.set_footer(text="✅ All players displayed")
+        else:
+            embed.set_footer(text=f"Auto-page {page_num + 1}/{total_pages}")
+        
+        await ctx.send(embed=embed)
+        
+        # Małe opóźnienie między wiadomościami, żeby Discord nie zablokował
+        if page_num < total_pages - 1:
+            await asyncio.sleep(0.3)
 
 @bot.command(name='clearmystats')
 async def clear_stats(ctx):
@@ -612,7 +664,7 @@ async def backup_command(ctx):
 # ========== START BOT ==========
 if __name__ == "__main__":
     logger.info("=" * 50)
-    logger.info("🚀 FINAL VERSION: GuildStats Bot with PERSISTENT STORAGE & PAGINATION")
+    logger.info("🚀 FINAL VERSION: GuildStats Bot with AUTO-LIST (shows all players)")
     logger.info("=" * 50)
     
     from dotenv import load_dotenv
