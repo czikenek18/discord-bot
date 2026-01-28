@@ -63,6 +63,26 @@ for cls in AVAILABLE_CLASSES:
     CLASS_MAPPING[cls_lower.replace(" ", "")] = cls
     CLASS_MAPPING[cls_lower.replace(" ", "-")] = cls
 
+# ========== ROLE CHECK FUNCTIONS ==========
+def is_hell_keeper(ctx):
+    """Check if user has HellKeeper role (case-insensitive)"""
+    if not ctx.guild:  # DM check
+        return False
+    
+    # Lista możliwych nazw roli HellKeeper
+    hell_keeper_names = ["hellkeeper", "hellkeepers", "hell keeper", "hell keepers"]
+    
+    for role in ctx.author.roles:
+        role_name_lower = role.name.lower()
+        # Sprawdź czy jakakolwiek część nazwy roli pasuje
+        if any(hk_name in role_name_lower for hk_name in hell_keeper_names):
+            return True
+    return False
+
+def not_hell_keeper(ctx):
+    """Check if user is NOT HellKeeper"""
+    return not is_hell_keeper(ctx)
+
 # ========== PERSISTENT STORAGE ==========
 def get_storage_path():
     """Get persistent storage path (Railway Volume first)"""
@@ -145,6 +165,17 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        if is_hell_keeper(ctx):
+            await ctx.send("❌ **Access Denied:** HellKeepers cannot use this command!")
+        else:
+            await ctx.send("❌ You don't have permission to use this command!")
+        return
+    # Reszta error handling
+    raise error
+
 # ========== HELPER FUNCTIONS ==========
 async def send_help(user):
     embed = discord.Embed(
@@ -204,6 +235,7 @@ async def test_command(ctx):
     await ctx.send('✅ Bot is online and working!')
 
 @bot.command(name='status')
+@commands.check(not_hell_keeper)
 async def status_command(ctx):
     stats = load_stats()
     
@@ -415,6 +447,7 @@ async def update_stats(ctx, attack: int = None, defense: int = None, accuracy: i
         await ctx.send('❌ Error saving.')
 
 @bot.command(name='guildpower')
+@commands.check(not_hell_keeper)
 async def guild_power(ctx):
     if isinstance(ctx.channel, discord.DMChannel):
         await ctx.send('❌ Use on server channel.')
@@ -461,6 +494,7 @@ async def guild_power(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='list', aliases=['l'])
+@commands.check(not_hell_keeper)
 async def list_stats(ctx):
     """List ALL players automatically (shows all on one page if possible)"""
     if isinstance(ctx.channel, discord.DMChannel):
